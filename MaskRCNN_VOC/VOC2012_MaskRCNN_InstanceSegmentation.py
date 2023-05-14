@@ -16,7 +16,12 @@ from pathlib import Path
 from torchvision.datasets.voc import *
 from torchvision.models.detection import FasterRCNN
 from torchvision.models.detection.rpn import AnchorGenerator
-from torch.nn.parallel import DistributedDataParallel as DDP
+
+from TorchFramework import *
+
+from customize import torch_customize
+
+torch_customize.customize_all()
 
 class Device:
     # Input data
@@ -74,6 +79,7 @@ class Dataset(torch.utils.data.Dataset):
         jitter = False,
         expending_size = 1
     ):
+
         root = Path(root)
         self.image_transform = image_transform
         self.label_transform = label_transform
@@ -228,62 +234,38 @@ class Task:
         return torch.mean(torch.stack(losses_list))
     
     @staticmethod
-    def train_one_epoch(model, data_loader, optimizer, scheduler, device):
-        model.train()
-        model.to(device)
-        losses_list = []
-        for images, targets in tqdm(data_loader):
-            # to device
-            images, targets = Device.to_for_batch_data((images, targets), device)
-
-            # model
-            loss_dict = model(images, targets)
-
-            # loss
-            loss_list = torch.stack([value for value in loss_dict.values()])
-            losses = loss_list.sum()
-            # losses = loss_list @ loss_list**(1/2)
-            losses_list.append(losses)
-
-            # back propergation
-            optimizer.zero_grad()
-            losses.backward()
-            optimizer.step()
-        
-        scheduler.step()
-
-        return torch.mean(torch.stack(losses_list)).item()
+    def is_main(world_size, rank, main_rank = 0):
+        return (world_size == 1) or (1 < world_size and rank == main_rank)
 
     @staticmethod
-    def get_dataloader(dataset, batch_size = 1, rank = 0, world_size = 1, shuffle = True):
+    def get_dataloader(dataset, batch_size = 1, rank = 0, world_size = 1, num_workers = 1, shuffle = True):
         def collate_batch(batch):
             images = [sample[0] for sample in batch]
             targets = [sample[1] for sample in batch]
             
             return images, targets
         sampler = torch.utils.data.DistributedSampler(dataset, num_replicas = world_size, rank = rank, shuffle = shuffle, seed = 0, drop_last = False)
-        return torch.utils.data.DataLoader(dataset, batch_size = batch_size, collate_fn=collate_batch, sampler = sampler)
+        return torch.utils.data.DataLoader(dataset, batch_size = batch_size, num_workers = num_workers, collate_fn=collate_batch, sampler = sampler)
 
     @staticmethod
-    def get_dataset_and_loader(batch_size, rank = 0, world_size = 1, cropping = False, mask_expending = False, flip = False, jitter = False, expending_size = 1):
-        t_dataset = Dataset(root = "/home/VOCdevkit/VOC2012", image_set = "train", 
+    def get_dataset_and_loader(batch_size, rank = 0, world_size = 1, num_workers = 1, cropping = False, mask_expending = False, flip = False, jitter = False, expending_size = 1):
+        t_dataset = Dataset(root = "/home/jovyan/data/VOCdevkit/VOC2012", image_set = "train", 
             cropping = cropping, mask_expending = mask_expending, flip = flip, jitter = jitter, expending_size = expending_size)
-        t_dataloader = __class__.get_dataloader(t_dataset, batch_size=batch_size, rank = rank, world_size = world_size)
+        t_dataloader = __class__.get_dataloader(t_dataset, batch_size=batch_size, rank = rank, world_size = world_size, num_workers = num_workers)
 
-        v_dataset = Dataset(root = "/home/VOCdevkit/VOC2012", image_set = "val")
-        v_dataloader = __class__.get_dataloader(v_dataset, batch_size=batch_size, rank = rank, world_size = world_size)
+        v_dataset = Dataset(root = "/home/jovyan/data/VOCdevkit/VOC2012", image_set = "val")
+        v_dataloader = __class__.get_dataloader(v_dataset, batch_size=batch_size, rank = rank, world_size = world_size, num_workers = num_workers)
 
         return t_dataset, t_dataloader, v_dataset, v_dataloader
 
     @staticmethod
     def get_model(pre_trained_model_path = ""):
-        model = torchvision.models.detection.maskrcnn_resnet50_fpn_v2(pretrained=True)
+        model = torchvision.models.detection.maskrcnn_resnet50_fpn_v2(weights='DEFAULT')
         model.roi_heads.box_predictor.cls_score = torch.nn.Linear(in_features=1024, out_features=21, bias=True)
         model.roi_heads.box_predictor.bbox_pred = torch.nn.Linear(in_features=1024, out_features=84, bias=True)
         model.roi_heads.mask_predictor.mask_fcn_logits = torch.nn.Conv2d(256, 21, kernel_size=(1, 1), stride=(1, 1))
         if pre_trained_model_path:
-            model.load_state_dict(torch.load(pre_trained_model_path))
-
+            model.load_state_dict(torch.load(pre_trained_model_path), strict = False)
         return model
 
     @staticmethod
@@ -312,11 +294,15 @@ class Task:
         return  Converter.squeeze_dimention_for_sample_result(result)
 
     @staticmethod
-    def loss_eval(model, device, data_loader):
+    def loss_eval(model, device, dataloader, world_size = 1, rank = 0, main_rank = 0):
         model.train()
         model.to(device)
         loss_list = []
-        for sample in tqdm(data_loader):
+
+        if __class__.is_main(world_size, rank, main_rank):
+            dataloader = tqdm(dataloader)
+
+        for sample in dataloader:
             images, targets = Device.to_for_batch_data(sample, device)
             loss_dict = model(images, targets)
             loss_vector = torch.stack([value for value in loss_dict.values()])
@@ -325,12 +311,15 @@ class Task:
             
         return np.array(loss_list).mean()
         
-    def map_eval(model, device, data_loader, mask_threshold = 0.5, iou_threshold = 0.5):
+    def map_eval(model, device, dataloader, mask_threshold = 0.5, iou_threshold = 0.5, world_size = 1, rank = 0, main_rank = 0):
         model.eval()
         model.to(device)
 
+        if __class__.is_main(world_size, rank, main_rank):
+            dataloader = tqdm(dataloader)
+
         counts = []
-        for images, targets in tqdm(data_loader):
+        for images, targets in dataloader:
             images, targets = Device.to_for_batch_data((images, targets), device)
             results = model(images, targets)
 
@@ -344,7 +333,6 @@ class Task:
                 gt_labels, gt_boxes, gt_masks = Converter.dict_to_tuple_for_target(target)
 
                 p_masks = MH.to_binary_by_threshold(p_masks, threshold = mask_threshold).squeeze(1)
-
 
                 count_result = MH.count_result(p_masks, p_labels, p_scores, gt_masks, gt_labels, 
                                             class_num = __class__.CLASS_NUM, 
@@ -537,13 +525,58 @@ class Visualizer:
             sub.set_title(f"GT({VOC_LABEL[t_label]})", fontdict={"fontsize":8})
 
 
+class MaskRCNN(TorchTask):        
+    # Element
+    def get_model(self):
+        return Task.get_model()
 
+    def get_dataset_and_loader(self, world_size, rank, batch_size):
+        return Task.get_dataset_and_loader(batch_size, rank=rank, world_size=world_size, num_workers = 0)
 
+    def get_optimizer(self, parameters):
+        return torch.optim.SGD(parameters, lr=0.01, momentum=0.9, weight_decay=0.0005)
 
+    def get_scheduler(self, optimizer):
+        return torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lambda epoch: 0.95 ** (epoch/2), last_epoch=-1, verbose=False)
 
+    # Context
 
+    def before_loss_eval(self, model):
+        model.train()
 
+    def to_for_batch(self, batch, device):
+        return Device.to_for_batch_data(batch, device)
 
+    def feed(self, model, batch):
+        images, targets = batch
+        return model(images, targets)
 
+    def result_to_loss(self, result):
+        return torch.stack([value for value in result.values()]).sum()
 
+class MaskRCNN_Mask_Expending(MaskRCNN):     
+      
+    def __init__(self, expending_size):
+        self.expending_size = expending_size
+
+    def get_dataset_and_loader(self, world_size, rank, batch_size):
+        return Task.get_dataset_and_loader(batch_size, rank=rank, world_size=world_size, num_workers = 0, 
+                                            mask_expending = True, expending_size = self.expending_size)
+
+class MaskRCNN_Boundary_Reinforcement(MaskRCNN):
+    def __init__(self, boundary_size):
+        self.boundary_size = boundary_size
+
+        def init_train_mode(self, model):
+            model.train()
+
+    def before_train_one_epoch(self, model):
+        # 매 train 전에 torch 코드의 boundary loss 부분 수정
+        BOUNDARY_LOSS = True
+        BOUNDARY_SIZE = self.boundary_size
+        model.train()
+
+    def after_train_one_epoch(self, model):
+        # boudary loss 제거
+        BOUNDARY_LOSS = False
 

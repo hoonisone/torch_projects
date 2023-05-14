@@ -1,7 +1,7 @@
 import torch
 import torchvision
 import numpy as np
-from typing import Dict, List, Any\
+from typing import Dict, List, Any
 
 def random_cropping(image1, image2, size):
     """
