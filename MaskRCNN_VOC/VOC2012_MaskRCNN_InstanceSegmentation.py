@@ -8,6 +8,8 @@ import numpy as np
 import mh_utils as MH
 import bbox_visualizer as bbv
 import matplotlib.pyplot as plt
+from overrides import overrides
+
 
 from PIL import Image
 from tqdm import tqdm
@@ -248,13 +250,13 @@ class Task:
         return torch.utils.data.DataLoader(dataset, batch_size = batch_size, num_workers = num_workers, collate_fn=collate_batch, sampler = sampler)
 
     @staticmethod
-    def get_dataset_and_loader(batch_size, rank = 0, world_size = 1, num_workers = 1, cropping = False, mask_expending = False, flip = False, jitter = False, expending_size = 1):
+    def get_dataset_and_loader(batch_size, rank = 0, world_size = 1, num_workers = 1, cropping = False, mask_expending = False, flip = False, jitter = False, expending_size = 1, shuffle = True):
         t_dataset = Dataset(root = "/home/jovyan/data/VOCdevkit/VOC2012", image_set = "train", 
             cropping = cropping, mask_expending = mask_expending, flip = flip, jitter = jitter, expending_size = expending_size)
-        t_dataloader = __class__.get_dataloader(t_dataset, batch_size=batch_size, rank = rank, world_size = world_size, num_workers = num_workers)
+        t_dataloader = __class__.get_dataloader(t_dataset, batch_size=batch_size, rank = rank, world_size = world_size, num_workers = num_workers, shuffle = shuffle)
 
         v_dataset = Dataset(root = "/home/jovyan/data/VOCdevkit/VOC2012", image_set = "val")
-        v_dataloader = __class__.get_dataloader(v_dataset, batch_size=batch_size, rank = rank, world_size = world_size, num_workers = num_workers)
+        v_dataloader = __class__.get_dataloader(v_dataset, batch_size=batch_size, rank = rank, world_size = world_size, num_workers = num_workers, shuffle = shuffle)
 
         return t_dataset, t_dataloader, v_dataset, v_dataloader
 
@@ -265,7 +267,7 @@ class Task:
         model.roi_heads.box_predictor.bbox_pred = torch.nn.Linear(in_features=1024, out_features=84, bias=True)
         model.roi_heads.mask_predictor.mask_fcn_logits = torch.nn.Conv2d(256, 21, kernel_size=(1, 1), stride=(1, 1))
         if pre_trained_model_path:
-            model.load_state_dict(torch.load(pre_trained_model_path), strict = False)
+            model.load_state_dict(torch.load(pre_trained_model_path))
         return model
 
     @staticmethod
@@ -527,55 +529,70 @@ class Visualizer:
 
 class MaskRCNN(TorchTask):        
     # Element
+
+    @overrides
     def get_model(self):
         return Task.get_model()
 
+    @overrides
     def get_dataset_and_loader(self, world_size, rank, batch_size):
         return Task.get_dataset_and_loader(batch_size, rank=rank, world_size=world_size, num_workers = 0)
 
+    @overrides
     def get_optimizer(self, parameters):
         return torch.optim.SGD(parameters, lr=0.01, momentum=0.9, weight_decay=0.0005)
 
+    @overrides
     def get_scheduler(self, optimizer):
-        return torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lambda epoch: 0.95 ** (epoch/2), last_epoch=-1, verbose=False)
+        return torch.optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=lambda epoch: 0.95 ** epoch, last_epoch=-1, verbose=False)
 
     # Context
 
+    @overrides
     def before_loss_eval(self, model):
         model.train()
 
+    @overrides
     def to_for_batch(self, batch, device):
         return Device.to_for_batch_data(batch, device)
 
+    @overrides
     def feed(self, model, batch):
         images, targets = batch
         return model(images, targets)
 
+    @overrides
     def result_to_loss(self, result):
-        return torch.stack([value for value in result.values()]).sum()
+        v = torch.stack([value for value in result.values()])
+        return v @ v ** (1/2)
+        # return torch.stack([value for value in result.values()]).sum()
 
 class MaskRCNN_Mask_Expending(MaskRCNN):     
-      
+    @overrides
     def __init__(self, expending_size):
         self.expending_size = expending_size
 
+    @overrides
     def get_dataset_and_loader(self, world_size, rank, batch_size):
         return Task.get_dataset_and_loader(batch_size, rank=rank, world_size=world_size, num_workers = 0, 
                                             mask_expending = True, expending_size = self.expending_size)
 
 class MaskRCNN_Boundary_Reinforcement(MaskRCNN):
+
     def __init__(self, boundary_size):
         self.boundary_size = boundary_size
 
         def init_train_mode(self, model):
             model.train()
-
+    
+    @overrides
     def before_train_one_epoch(self, model):
         # 매 train 전에 torch 코드의 boundary loss 부분 수정
         BOUNDARY_LOSS = True
         BOUNDARY_SIZE = self.boundary_size
         model.train()
 
+    @overrides
     def after_train_one_epoch(self, model):
         # boudary loss 제거
         BOUNDARY_LOSS = False

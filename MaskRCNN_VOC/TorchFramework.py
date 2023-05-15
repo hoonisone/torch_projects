@@ -3,8 +3,9 @@ from pathlib import Path
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 import pickle
+from overrides import EnforceOverrides
 
-class TorchTask:
+class TorchTask(EnforceOverrides):
     # Element
     def get_model(self):
         raise NotImplementedError()
@@ -40,7 +41,7 @@ class TorchTask:
     def result_to_loss(self, result):
         raise NotImplementedError()
 
-class TorchTaskWorker:
+class TorchTaskWorker(EnforceOverrides):
     def __init__(self, task):
         self.task = task
 
@@ -64,7 +65,8 @@ class TorchTaskWorker:
             batch = self.task.to_for_batch(batch, device)
             result = self.task.feed(model, batch)
             # if torch.distributed.get_rank() == 0:
-            #     print(result["loss_mask"])
+            #     # print(result["loss_mask"])
+            #     print(result)
             loss = self.task.result_to_loss(result)
             
             # back propergation
@@ -162,6 +164,10 @@ class TorchTaskWorker:
             # Save Checkpoint
             if (save_checkpoint) and (e%save_checkpoint_frequency == 0):
                 torch.save(model.state_dict(), f"{save_dir}/checkpoint({e})")
+                if isinstance(model, DDP):
+                    torch.save(model.module.state_dict(), f"{save_dir}/checkpoint({e})")
+                else:
+                    torch.save(model.state_dict(), f"{save_dir}/checkpoint({e})")
 
             # Save Log
             loss_dict = {"train_loss_list": train_loss_list, "val_loss_list": val_loss_list}
@@ -170,9 +176,13 @@ class TorchTaskWorker:
                     pickle.dump(loss_dict, file)
 
         if save_model:
-            torch.save(model.state_dict(), f"{save_dir}/final_model({epoch})")
+            if isinstance(model, DDP):
+                torch.save(model.module.state_dict(), f"{save_dir}/final_model({epoch})")
+            else:
+                torch.save(model.state_dict(), f"{save_dir}/final_model({epoch})")
 
     # DDP
+
     def train_val_worker(self, rank = 0, world_size = 1, main_rank=0, batch_size =1, epoch = 1, device = "cpu",
             val_frequency = 1, 
             show_log = False,

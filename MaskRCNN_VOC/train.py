@@ -20,7 +20,7 @@ def worker(rank, world_size, torch_task, save_dir):
         show_log_frequency = 1,
         save_dir = save_dir,
         save_checkpoint = True,
-        save_checkpoint_frequency = 5,
+        save_checkpoint_frequency = 1,
         save_log = True, 
         save_model = True,
         
@@ -41,19 +41,19 @@ if __name__=="__main__":
     print(f"""*****Start Multi Processing (PyTorch)*****\n* WorldSize: {world_size}\n""")
 
     torch_tasks = [
-        MaskRCNN(),
-        MaskRCNN_Boundary_Reinforcement(boundary_size=1),
-        MaskRCNN_Boundary_Reinforcement(boundary_size=2),
-        MaskRCNN_Boundary_Reinforcement(boundary_size=3),
+        # MaskRCNN(),
+        # MaskRCNN_Boundary_Reinforcement(boundary_size=1),
+        # MaskRCNN_Boundary_Reinforcement(boundary_size=2),
+        # MaskRCNN_Boundary_Reinforcement(boundary_size=3),
         MaskRCNN_Mask_Expending(expending_size=1),
-        MaskRCNN_Mask_Expending(expending_size=1),
-        MaskRCNN_Mask_Expending(expending_size=1),
+        MaskRCNN_Mask_Expending(expending_size=2),
+        MaskRCNN_Mask_Expending(expending_size=3),
     ]
     save_dir_list = [
-        "./result/benchmark",
-        "./result/boundary(size=1)",
-        "./result/boundary(size=2)",
-        "./result/boundary(size=3)",
+        # "./result/benchmark",
+        # "./result/boundary(size=1)",
+        # "./result/boundary(size=2)",
+        # "./result/boundary(size=3)",
         "./result/expending(size=1)",
         "./result/expending(size=2)",
         "./result/expending(size=3)",
