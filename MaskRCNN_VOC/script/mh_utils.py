@@ -2,6 +2,7 @@ import torch
 import torchvision
 import numpy as np
 from typing import Dict, List, Any
+import cv2
 
 def random_cropping(image1, image2, size):
     """
@@ -85,7 +86,7 @@ def pair_up_instances(candidates, targets, class_num, iou_threshold = 0.5):
             - 대상이 없는 경우 -1로 반환한다.
 
         [Args]
-            * candidates: (__Dict[str, any]__)rlslvlrl: detected instances
+            * candidates: (__Dict[str, any]__): detected instances
                 {
                     "scores": Numpy(N, dtype = float32)             # N = detected instance num
                     "labels": Numpy(N, 4, dtype = float32)               
@@ -348,3 +349,82 @@ def ap_per_class(detected_num, gt_num, tp_num):
         ap_list.append(ap_value)
 
     return np.array(ap_list)
+
+
+def overlay(image, mask, color, alpha):
+    """
+    [Operation]
+        Combines image and its segmentation mask into a single image.
+    [Args]
+        image: Training image. np.ndarray,
+        mask: Segmentation mask. np.ndarray,
+        color: Color for segmentation mask rendering.  tuple[int, int, int] = (255, 0, 0)
+        alpha: Segmentation mask's transparency. float = 0.5,
+
+    [Returns]
+        image_combined: (__Numpy(H, W, 3)__) The combined image.
+
+    """
+    color = color[::-1]
+    colored_mask = np.expand_dims(mask, 0).repeat(3, axis=0)
+    colored_mask = np.moveaxis(colored_mask, 0, -1)
+    masked = np.ma.MaskedArray(image, mask=colored_mask, fill_value=color)
+    image_overlay = masked.filled()
+
+    image_combined = cv2.addWeighted(image, 1 - alpha, image_overlay, alpha, 0)
+
+    return image_combined
+
+colors = [
+    [10,  0, 0], [0, 10,  0], [ 0, 0, 10],
+    [10, 10, 0], [0, 10, 10], [10, 0, 10],
+    [30,  0, 0], [0, 30,  0], [ 0, 0, 30], 
+    [30, 30, 0], [0, 30, 30], [30, 0, 30],
+    [50,  0, 0], [0, 50,  0], [ 0, 0, 50], 
+    [50, 50, 0], [0, 50, 50], [50, 0, 50],
+    [70,  0, 0], [0, 70,  0], [ 0, 0, 70], 
+    [70, 70, 0], [0, 70, 70], [70, 0, 70],
+    [90,  0, 0], [0, 90,  0], [ 0, 0, 90], 
+    [90, 90, 0], [0, 90, 90], [90, 0, 90],
+]
+
+    
+
+
+def get_nms_index(masks, scores, iou_threshold: float):
+    """
+    [Args]
+        masks: (__Tensor(N, W, H)__)
+        scores: (__Tensor(N, W, H, dtype = float)__)
+    [Operation]
+        nms 수행 후 살아남는 mask에 대한 idx만 반환
+    [Return]
+        int list
+    """
+    candidate = torch.argsort(-scores)
+    fix = [] 
+    while 0 < len(candidate):
+        fixed_idx = candidate[0]
+        fix.append(fixed_idx.item())
+        survive = []
+        for i in candidate[1:]:
+            if iou(masks[fixed_idx], masks[i]) < iou_threshold:
+                survive.append(i)
+        candidate = survive
+    return fix
+
+def aggregate(image, masks, alpha = 0.1):
+    """
+    [Args]
+        image = Numpy(3, H, W, dtype = float)
+        masks = Numpy(n, H, W, dtype = bool)
+        alpha: 투명도
+        
+    [Operation]
+        image위에 마스크를 입힌다.
+    """
+    for i, mask in enumerate(masks):
+        image  = overlay(image, mask, colors[i], alpha)
+    
+    return image
+

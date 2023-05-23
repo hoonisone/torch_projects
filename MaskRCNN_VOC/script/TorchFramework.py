@@ -6,6 +6,16 @@ import pickle
 from overrides import EnforceOverrides
 
 class TorchTask(EnforceOverrides):
+    ROOT_DIR = Path("./../result")
+    def __init__(self, name):
+        self.name = name
+
+    def get_name(self):
+        return self.name
+
+    def get_root_dir(self):
+        return __class__.ROOT_DIR/self.name
+        
     # Element
     def get_model(self):
         raise NotImplementedError()
@@ -21,9 +31,9 @@ class TorchTask(EnforceOverrides):
         raise NotImplementedError()
     def get_val_dataset(self):
         raise NotImplementedError()
-    def get_train_dataloader(self, dataset, batch_size = 1, world_size=1, rank=0):
+    def get_train_dataloader(self, batch_size = 1, world_size=1, rank=0):
         raise NotImplementedError()
-    def get_val_dataloader(self, dataset, batch_size = 1, world_size=1, rank=0):
+    def get_val_dataloader(self, batch_size = 1, world_size=1, rank=0):
         raise NotImplementedError()
 
     # device
@@ -49,19 +59,20 @@ class TorchTask(EnforceOverrides):
     def after_loss_eval(self, model):
         pass
 
-    def feed(self, model, batch):
+    def feed_for_batch_data(self, model, batch_data):
+        raise NotImplementedError()
+    def feed_for_batch_data(self, model, batch_data):
         raise NotImplementedError()
 
     def result_to_loss(self, result):
         raise NotImplementedError()
 
 class TorchTaskWorker(EnforceOverrides):
-    def __init__(self, task, epoch=1, batch_size=1, device = "cpu", save_dir = ""):
+    def __init__(self, task, epoch=1, batch_size=1, device = "cpu"):
         self.task = task
         self.epoch = epoch
         self.batch_size = batch_size
         self.device = device
-        self.save_dir = save_dir
 
 
         # default options
@@ -69,7 +80,7 @@ class TorchTaskWorker(EnforceOverrides):
         self.show_log = True
         self.show_log_frequency = 1
         self.save_checkpoint = True
-        self.save_checkpoint_frequency = 10
+        self.save_checkpoint_frequency = 5
         self.save_log = True
         self.save_model = True
         
@@ -97,7 +108,7 @@ class TorchTaskWorker(EnforceOverrides):
             
         for i, batch in enumerate(dataloader):
             batch = self.task.to_for_batch_data(batch, device)
-            result = self.task.feed(model, batch)
+            result = self.task.feed_for_batch_data(model, batch)
             loss = self.task.result_to_loss(result)
             
             optimizer.zero_grad()
@@ -125,7 +136,7 @@ class TorchTaskWorker(EnforceOverrides):
 
         for batch in dataloader:
             batch = self.task.to_for_batch_data(batch, device)
-            result = self.task.feed(model, batch)
+            result = self.task.feed_for_batch_data(model, batch)
             loss = self.task.result_to_loss(result).detach().to("cpu")
             loss_list.append(loss)
             
@@ -140,7 +151,7 @@ class TorchTaskWorker(EnforceOverrides):
         [Operation]
             입력된 모델과 데이터에 대해 정해진 에폭만큼 train, val을 수행하고 결과 반환
         """
-        Path(self.save_dir).mkdir(parents=True, exist_ok=True)
+        Path(self.task.get_root_dir()).mkdir(parents=True, exist_ok=True)
 
         train_loss_list, val_loss_list = [], []
 
@@ -167,29 +178,28 @@ class TorchTaskWorker(EnforceOverrides):
 
             # Save Checkpoint
             if (self.save_checkpoint) and (e%self.save_checkpoint_frequency == 0):
-                torch.save(model.state_dict(), f"{self.save_dir}/checkpoint({e})")
                 if isinstance(model, DDP):
-                    torch.save(model.module.state_dict(), f"{self.save_dir}/checkpoint({e})")
+                    torch.save(model.module.state_dict(), self.task.get_root_dir()/f"checkpoint({e})")
                 else:
-                    torch.save(model.state_dict(), f"{self.save_dir}/checkpoint({e})")
+                    torch.save(model.state_dict(), self.task.get_root_dir()/f"checkpoint({e})")
 
             # Save Log
             loss_dict = {"train_loss_list": train_loss_list, "val_loss_list": val_loss_list}
             if self.save_log:
-                with open(f"{self.save_dir}/loss_dict.p", 'wb') as file:
+                with open(self.task.get_root_dir()/"loss_dict.p", 'wb') as file:
                     pickle.dump(loss_dict, file)
 
         if self.save_model:
             if isinstance(model, DDP):
-                torch.save(model.module.state_dict(), f"{self.save_dir}/final_model({epoch})")
+                torch.save(model.module.state_dict(), self.task.get_root_dir()/f"final_model({epoch})")
             else:
-                torch.save(model.state_dict(), f"{self.save_dir}/final_model({epoch})")
+                torch.save(model.state_dict(), self.task.get_root_dir()/f"final_model({epoch})")
 
 
     def single_train_val_worker(self):
         model = self.task.get_model().to(self.device)
-        t_dataloader = self.task.get_train_dataloader(self.task.get_train_dataset(), batch_size = self.batch_size)
-        v_dataloader = self.task.get_val_dataloader(self.task.get_val_dataset(), batch_size = self.batch_size)
+        t_dataloader = self.task.get_train_dataloader(batch_size = self.batch_size)
+        v_dataloader = self.task.get_val_dataloader(batch_size = self.batch_size)
         parameters = [p for p in model.parameters() if p.requires_grad]
         optimizer = self.task.get_optimizer(parameters)
         scheduler = self.task.get_scheduler(optimizer)
